@@ -36,8 +36,8 @@ int main(int argc, char **argv) {
   std::stringstream file_output;
   std::ostringstream oss;
   std::string now_time;
-  size_t height = 100;
-  size_t width = 100;
+  size_t height = std::stoul(argv[1]);
+  size_t width = std::stoul(argv[1]);
 
   MatrixMPI A, V, s, A_copy;
 
