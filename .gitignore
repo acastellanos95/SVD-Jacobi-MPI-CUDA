@@ -1,0 +1,28 @@
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin
+
+.idea
+.fleet
+
+# cmake
+build/.cmake
+build/CMakeFiles
+build/Testing
+build/.ninja_deps
+build/.ninja_log
+build/cmake_install.cmake
+build/build.ninja
+build/CMakeCache.txt
+build/compile_commands.json
+build/Makefile
+
+# IDE
+.idea
+.vscode
+.cache
+.clangd
+compile_commands.json
