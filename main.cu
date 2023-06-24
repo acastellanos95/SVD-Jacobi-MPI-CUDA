@@ -175,7 +175,7 @@ int main(int argc, char **argv) {
     file_output << "||A-USVt||_F: " << sqrt(frobenius_norm) << "\n";
     std::cout << "||A-USVt||_F: " << sqrt(frobenius_norm) << "\n";
 
-    std::ofstream file("reporte-" + now_time + ".txt", std::ofstream::out | std::ofstream::trunc);
+    std::ofstream file("reporte-dimension-" + std::to_string(height) + "-time-" + now_time + ".txt", std::ofstream::out | std::ofstream::trunc);
     file << file_output.rdbuf();
     file.close();
     A.free(), V.free(), s.free(), A_copy.free();
