@@ -5,7 +5,7 @@
 #ifndef SVD_JACOBI_MPI_CUDA_LIB_MATRIX_CUH_
 #define SVD_JACOBI_MPI_CUDA_LIB_MATRIX_CUH_
 
-#include <vector>
+#include "../../../../../../usr/include/c++/11/vector"
 
 struct MatrixMPI{
   unsigned long width{};

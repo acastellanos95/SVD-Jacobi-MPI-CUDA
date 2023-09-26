@@ -7,11 +7,11 @@
 
 #include "Matrix.cuh"
 #include "global.cuh"
-#include <tuple>
-#include <stdexcept>
-#include <functional>
-#include <iostream>
-#include <cmath>
+#include "../../../../../../usr/include/c++/11/tuple"
+#include "../../../../../../usr/include/c++/11/stdexcept"
+#include "../../../../../../usr/include/c++/11/functional"
+#include "../../../../../../usr/include/c++/11/iostream"
+#include "../../../../../../usr/include/c++/11/cmath"
 
 namespace Thesis {
 

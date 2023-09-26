@@ -188,7 +188,7 @@ namespace Thesis {
 *********************************************************************************/
 
 
-void omp_mpi_dgesvd_local_matrices(SVD_OPTIONS jobu,
+void omp_mpi_cuda_dgesvd_local_matrices(SVD_OPTIONS jobu,
                                    SVD_OPTIONS jobv,
                                    size_t m,
                                    size_t n,
@@ -233,19 +233,19 @@ void omp_mpi_dgesvd_local_matrices(SVD_OPTIONS jobu,
   // Stopping condition in Hogben, L. (Ed.). (2013). Handbook of Linear Algebra (2nd ed.). Chapman and Hall/CRC. https://doi.org/10.1201/b16113
   size_t maxIterations = 1;
 
+  std::vector<double*> d_p_vectors(num_of_threads);
+  std::vector<double*> d_q_vectors(num_of_threads);
+  std::vector<double*> d_v_p_vectors(num_of_threads);
+  std::vector<double*> d_v_q_vectors(num_of_threads);
+
+  for(size_t i = 0; i < num_of_threads; i++){
+    cudaMalloc(&d_p_vectors[i], m * sizeof(double));
+    cudaMalloc(&d_q_vectors[i], m * sizeof(double));
+    cudaMalloc(&d_v_p_vectors[i], n * sizeof(double));
+    cudaMalloc(&d_v_q_vectors[i], n * sizeof(double));
+  }
+
   for(auto number_iterations = 0; number_iterations < maxIterations; ++number_iterations){
-
-    std::vector<double*> d_p_vectors(num_of_threads);
-    std::vector<double*> d_q_vectors(num_of_threads);
-    std::vector<double*> d_v_p_vectors(num_of_threads);
-    std::vector<double*> d_v_q_vectors(num_of_threads);
-
-    for(size_t i = 0; i < num_of_threads; i++){
-      cudaMalloc(&d_p_vectors[i], m * sizeof(double));
-      cudaMalloc(&d_q_vectors[i], m * sizeof(double));
-      cudaMalloc(&d_v_p_vectors[i], n * sizeof(double));
-      cudaMalloc(&d_v_q_vectors[i], n * sizeof(double));
-    }
 
     // Ordering in  A. Sameh. On Jacobi and Jacobi-like algorithms for a parallel computer. Math. Comput., 25:579–590,
     // 1971
@@ -1134,13 +1134,13 @@ void omp_mpi_dgesvd_local_matrices(SVD_OPTIONS jobu,
 
       MPI_Barrier(MPI_COMM_WORLD);
     }
+  }
 
-    for(size_t i = 0; i < num_of_threads; i++){
-      cudaFree(d_p_vectors[i]);
-      cudaFree(d_q_vectors[i]);
-      cudaFree(d_v_p_vectors[i]);
-      cudaFree(d_v_q_vectors[i]);
-    }
+  for(size_t i = 0; i < num_of_threads; i++){
+    cudaFree(d_p_vectors[i]);
+    cudaFree(d_q_vectors[i]);
+    cudaFree(d_v_p_vectors[i]);
+    cudaFree(d_v_q_vectors[i]);
   }
 
   if(rank == ROOT_RANK){
@@ -1172,6 +1172,282 @@ void omp_mpi_dgesvd_local_matrices(SVD_OPTIONS jobu,
 //      }
     }
   }
+}
+
+void cuda_dgesvd_kernel(SVD_OPTIONS jobu,
+                        SVD_OPTIONS jobv,
+                        size_t m,
+                        size_t n,
+                        Matrix &A,
+                        size_t lda,
+                        Matrix &s,
+                        Matrix &V,
+                        size_t ldv) {
+  auto num_of_threads = Thesis::omp_thread_count();
+
+  int threadsPerBlock = 16;
+  dim3 A_blocksPerGrid  (ceil( float(m) / threadsPerBlock ));
+  dim3 V_blocksPerGrid  (ceil( float(n) / threadsPerBlock ));
+
+  // Initializing V = 1
+  if (jobv == AllVec) {
+    for (size_t i = 0; i < n; ++i) {
+      V.elements[iteratorC(i, i, ldv)] = 1.0;
+    }
+  } else if (jobv == SomeVec) {
+    for (size_t i = 0; i < std::min(m, n); ++i) {
+      V.elements[iteratorC(i, i, ldv)] = 1.0;
+    }
+  }
+
+  size_t m_ordering = (n + 1) / 2;
+
+#ifdef DEBUG
+  // Report Matrix A^T * A
+  std::cout << std::fixed << std::setprecision(3) << "A^T * A: \n";
+  for (size_t indexRow = 0; indexRow < m; ++indexRow) {
+    for (size_t indexCol = 0; indexCol < n; ++indexCol) {
+      double value = 0.0;
+      for(size_t k_dot = 0; k_dot < m; ++k_dot){
+        value += A.elements[iterator(k_dot, indexRow, lda)] * A.elements[iterator(k_dot, indexCol, lda)];
+      }
+      std::cout << value << " ";
+    }
+    std::cout << '\n';
+  }
+#endif
+  // Stopping condition in Hogben, L. (Ed.). (2013). Handbook of Linear Algebra (2nd ed.). Chapman and Hall/CRC. https://doi.org/10.1201/b16113
+  size_t maxIterations = 1;
+
+  std::vector<double*> d_p_vectors(num_of_threads);
+  std::vector<double*> d_q_vectors(num_of_threads);
+  std::vector<double*> d_v_p_vectors(num_of_threads);
+  std::vector<double*> d_v_q_vectors(num_of_threads);
+
+  for(size_t i = 0; i < num_of_threads; i++){
+    cudaMalloc(&d_p_vectors[i], m * sizeof(double));
+    cudaMalloc(&d_q_vectors[i], m * sizeof(double));
+    cudaMalloc(&d_v_p_vectors[i], n * sizeof(double));
+    cudaMalloc(&d_v_q_vectors[i], n * sizeof(double));
+  }
+
+  for(auto number_iterations = 0; number_iterations < maxIterations; ++number_iterations){
+    // Ordering in  A. Sameh. On Jacobi and Jacobi-like algorithms for a parallel computer. Math. Comput., 25:579–590,
+    // 1971
+    for (size_t k = 1; k < m_ordering; ++k) {
+      size_t p = 0;
+      size_t p_trans = 0;
+      size_t q_trans = 0;
+
+#pragma omp parallel for private(p, p_trans, q_trans)
+      for (size_t q = m_ordering - k + 1; q <= n - k; ++q) {
+        size_t thread_id = omp_get_thread_num();
+        if (m_ordering - k + 1 <= q && q <= (2 * m_ordering) - (2 * k)) {
+          p = ((2 * m_ordering) - (2 * k) + 1) - q;
+        } else if ((2 * m_ordering) - (2 * k) < q && q <= (2 * m_ordering) - k - 1) {
+          p = ((4 * m_ordering) - (2 * k)) - q;
+        } else if ((2 * m_ordering) - k - 1 < q) {
+          p = n;
+        }
+
+        // Translate to (0,0)
+        p_trans = p - 1;
+        q_trans = q - 1;
+
+        double alpha = 0.0, beta = 0.0, gamma = 0.0;
+        // \alpha = a_p^T\cdot a_q, \beta = a_p^T\cdot a_p, \gamma = a_q^T\cdot a_q
+        double tmp_p, tmp_q;
+        for (size_t i = 0; i < m; ++i) {
+          tmp_p = A.elements[iteratorC(i, p_trans, lda)];
+          tmp_q = A.elements[iteratorC(i, q_trans, lda)];
+          alpha += tmp_p * tmp_q;
+          beta += tmp_p * tmp_p;
+          gamma += tmp_q * tmp_q;
+        }
+
+        // Schur
+        double c_schur = 1.0, s_schur = 0.0, aqq = gamma, app = beta, apq = alpha;
+
+        if (abs(apq) > 1e-20) {
+          double tau = (aqq - app) / (2.0 * apq);
+          double t = 0.0;
+
+          if (tau >= 0) {
+            t = 1.0 / (tau + sqrt(1 + (tau * tau)));
+          } else {
+            t = 1.0 / (tau - sqrt(1 + (tau * tau)));
+          }
+
+          c_schur = 1.0 / sqrt(1 + (t * t));
+          s_schur = t * c_schur;
+
+          cudaMemcpy(d_p_vectors[thread_id], (A.elements + p_trans*lda), m * sizeof(double),
+                     cudaMemcpyHostToDevice);
+          cudaMemcpy(d_q_vectors[thread_id], (A.elements + q_trans*lda), m * sizeof(double),
+                     cudaMemcpyHostToDevice);
+
+//          CUDAMatrix d_p_vector(, m), d_q_vector((A.elements + q_trans*lda), m);
+
+          jacobi_rotation<<<A_blocksPerGrid, threadsPerBlock>>>(m, d_p_vectors[thread_id], d_q_vectors[thread_id], c_schur, s_schur);
+
+          cudaMemcpy((A.elements + p_trans*lda), d_p_vectors[thread_id],m * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+          cudaMemcpy((A.elements + q_trans*lda), d_q_vectors[thread_id],m * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+//          d_p_vector.copy_to_host((A.elements + p_trans*lda), m);
+//          d_q_vector.copy_to_host((A.elements + q_trans*lda), m);
+//
+//          d_p_vector.free();
+//          d_q_vector.free();
+
+//          if (jobv == AllVec || jobv == SomeVec) {
+//            CUDAMatrix d_v_p_vector((V.elements + p_trans*lda), n), d_v_q_vector((V.elements + q_trans*lda), n);
+
+          cudaMemcpy(d_v_p_vectors[thread_id], (V.elements + p_trans*ldv), n * sizeof(double),
+                     cudaMemcpyHostToDevice);
+          cudaMemcpy(d_v_q_vectors[thread_id], (V.elements + q_trans*ldv), n * sizeof(double),
+                     cudaMemcpyHostToDevice);
+          jacobi_rotation<<<V_blocksPerGrid, threadsPerBlock>>>(n, d_v_p_vectors[thread_id], d_v_q_vectors[thread_id], c_schur, s_schur);
+
+          cudaMemcpy((V.elements + p_trans*ldv), d_v_p_vectors[thread_id],n * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+          cudaMemcpy((V.elements + q_trans*ldv), d_v_q_vectors[thread_id],n * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+//            d_v_p_vector.copy_to_host((V.elements + p_trans*lda), n);
+//            d_v_q_vector.copy_to_host((V.elements + q_trans*lda), n);
+
+//            d_v_p_vector.free();
+//            d_v_q_vector.free();
+//          }
+        }
+      }
+    }
+
+    for (size_t k = m_ordering; k < 2 * m_ordering; ++k) {
+      size_t thread_id = omp_thread_count();
+      size_t p = 0;
+      size_t p_trans = 0;
+      size_t q_trans = 0;
+#pragma omp parallel for private(p, p_trans, q_trans)
+      for (size_t q = (4 * m_ordering) - n - k; q < (3 * m_ordering) - k; ++q) {
+        if (q < (2 * m_ordering) - k + 1) {
+          p = n;
+        } else if ((2 * m_ordering) - k + 1 <= q && q <= (4 * m_ordering) - (2 * k) - 1) {
+          p = ((4 * m_ordering) - (2 * k)) - q;
+        } else if ((4 * m_ordering) - (2 * k) - 1 < q) {
+          p = ((6 * m_ordering) - (2 * k) - 1) - q;
+        }
+
+        // Translate to (0,0)
+        p_trans = p - 1;
+        q_trans = q - 1;
+
+        double alpha = 0.0, beta = 0.0, gamma = 0.0;
+        // \alpha = a_p^T\cdot a_q, \beta = a_p^T\cdot a_p, \gamma = a_q^T\cdot a_q
+        double tmp_p, tmp_q;
+        for (size_t i = 0; i < m; ++i) {
+          tmp_p = A.elements[iteratorC(i, p_trans, lda)];
+          tmp_q = A.elements[iteratorC(i, q_trans, lda)];
+          alpha += tmp_p * tmp_q;
+          beta += tmp_p * tmp_p;
+          gamma += tmp_q * tmp_q;
+        }
+
+        // Schur
+        double c_schur = 1.0, s_schur = 0.0, aqq = gamma, app = beta, apq = alpha;
+
+        if (abs(apq) > 1e-20) {
+          double tau = (aqq - app) / (2.0 * apq);
+          double t = 0.0;
+
+          if (tau >= 0) {
+            t = 1.0 / (tau + sqrt(1 + (tau * tau)));
+          } else {
+            t = 1.0 / (tau - sqrt(1 + (tau * tau)));
+          }
+
+          c_schur = 1.0 / sqrt(1 + (t * t));
+          s_schur = t * c_schur;
+
+          cudaMemcpy(d_p_vectors[thread_id], (A.elements + p_trans*lda), m * sizeof(double),
+                     cudaMemcpyHostToDevice);
+          cudaMemcpy(d_q_vectors[thread_id], (A.elements + q_trans*lda), m * sizeof(double),
+                     cudaMemcpyHostToDevice);
+
+//          CUDAMatrix d_p_vector(, m), d_q_vector((A.elements + q_trans*lda), m);
+
+          jacobi_rotation<<<A_blocksPerGrid, threadsPerBlock>>>(m, d_p_vectors[thread_id], d_q_vectors[thread_id], c_schur, s_schur);
+
+          cudaMemcpy((A.elements + p_trans*lda), d_p_vectors[thread_id],m * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+          cudaMemcpy((A.elements + q_trans*lda), d_q_vectors[thread_id],m * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+//          d_p_vector.copy_to_host((A.elements + p_trans*lda), m);
+//          d_q_vector.copy_to_host((A.elements + q_trans*lda), m);
+//
+//          d_p_vector.free();
+//          d_q_vector.free();
+
+//          if (jobv == AllVec || jobv == SomeVec) {
+//            CUDAMatrix d_v_p_vector((V.elements + p_trans*lda), n), d_v_q_vector((V.elements + q_trans*lda), n);
+
+          cudaMemcpy(d_v_p_vectors[thread_id], (V.elements + p_trans*ldv), n * sizeof(double),
+                     cudaMemcpyHostToDevice);
+          cudaMemcpy(d_v_q_vectors[thread_id], (V.elements + q_trans*ldv), n * sizeof(double),
+                     cudaMemcpyHostToDevice);
+          jacobi_rotation<<<V_blocksPerGrid, threadsPerBlock>>>(m, d_v_p_vectors[thread_id], d_v_q_vectors[thread_id], c_schur, s_schur);
+
+          cudaMemcpy((V.elements + p_trans*ldv), d_v_p_vectors[thread_id],n * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+          cudaMemcpy((V.elements + q_trans*ldv), d_v_q_vectors[thread_id],n * sizeof(double),
+                     cudaMemcpyDeviceToHost);
+//            d_v_p_vector.copy_to_host((V.elements + p_trans*lda), n);
+//            d_v_q_vector.copy_to_host((V.elements + q_trans*lda), n);
+
+//            d_v_p_vector.free();
+//            d_v_q_vector.free();
+//          }
+        }
+      }
+    }
+  }
+
+  for(size_t i = 0; i < num_of_threads; i++){
+    cudaFree(d_p_vectors[i]);
+    cudaFree(d_q_vectors[i]);
+    cudaFree(d_v_p_vectors[i]);
+    cudaFree(d_v_q_vectors[i]);
+  }
+
+  std::cout << "How many repetitions?: " << maxIterations << "\n";
+
+  // Compute \Sigma
+#pragma omp parallel for
+  for (size_t k = 0; k < std::min(m, n); ++k) {
+    for (size_t i = 0; i < m; ++i) {
+      s.elements[k] += A.elements[iteratorC(i, k, lda)] * A.elements[iteratorC(i, k, lda)];
+    }
+    s.elements[k] = sqrt(s.elements[k]);
+  }
+
+  //Compute U
+  if (jobu == AllVec) {
+#pragma omp parallel for
+    for (size_t i = 0; i < m; ++i) {
+      for (size_t j = 0; j < m; ++j) {
+        A.elements[iteratorC(j, i, lda)] = A.elements[iteratorC(j, i, lda)] / s.elements[i];
+      }
+    }
+  } else if (jobu == SomeVec) {
+#pragma omp parallel for
+    for (size_t k = 0; k < std::min(m, n); ++k) {
+      for (size_t i = 0; i < m; ++i) {
+        A.elements[iteratorC(i, k, lda)] = A.elements[iteratorC(i, k, lda)] / s.elements[k];
+      }
+    }
+  }
+
+//  delete []ordering_array;
 }
 
 /***************************************************************************
